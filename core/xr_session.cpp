@@ -434,7 +434,10 @@ bool Headset::frame(Interaction& ia, Renderer& r) {
     XrCompositionLayerProjection overLayer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
     bool rendered = false, overRendered = false;
     if (fs.shouldRender) {
-        float dt = lastTime ? (float)((fs.predictedDisplayTime - lastTime) * 1e-9) : 0.f; lastTime = fs.predictedDisplayTime;
+        float dt = lastTime ? (float)((fs.predictedDisplayTime - lastTime) * 1e-9) : 0.f;
+        ++framesDone;
+        if (lastTime && fs.predictedDisplayPeriod > 0 && fs.predictedDisplayTime - lastTime > fs.predictedDisplayPeriod * 3 / 2) ++framesLate;
+        lastTime = fs.predictedDisplayTime;
         if (dt < 0 || dt > 0.1f) dt = 1.f / 72.f;
         XrSpaceLocation hl{XR_TYPE_SPACE_LOCATION}; xrLocateSpace(viewSpace, appSpace, fs.predictedDisplayTime, &hl);
         headValid = (hl.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) && (hl.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT);

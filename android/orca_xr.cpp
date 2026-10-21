@@ -24,6 +24,7 @@
 #include <android/log.h>
 #include <unistd.h>
 #include <chrono>
+#include <deque>
 #include <cstring>
 #include <map>
 #include <thread>
@@ -187,10 +188,31 @@ float hit(V3 o, V3 d) {
     return c ? (float)c->xr_hit(vec(o), vec(d)) : -1.f;
 }
 
+// The ray's events, run from Qt's event loop outside the XR frame (Orca may open a menu or a dialog, a nested event loop,
+// from one, and frames must go on meanwhile), in order. A hover or a drag replaces the one before it still waiting (Orca
+// only needs the latest), and a hover with the ray where the last one left it is not sent: each runs Orca's picking and
+// redraws its window.
+struct RayEvent { int action; V3 o, d; };
+std::deque<RayEvent> gRayEvents; bool gRayDrainPosted = false;
+RayEvent gLastHover{-1, {}, {}};
+
+void drainRayEvents() {
+    gRayDrainPosted = false;
+    while (!gRayEvents.empty()) {
+        RayEvent e = gRayEvents.front(); gRayEvents.pop_front();
+        if (GLCanvas3D* c = shownCanvas()) c->xr_pointer(e.action, vec(e.o), vec(e.d));
+    }
+}
+
 void pointer(int action, V3 o, V3 d) {
-    // run from Qt's event loop, outside the XR frame: Orca may open a menu or a dialog (a nested event loop) from it, and
-    // frames must go on meanwhile
-    postToGui([action, o, d] { if (GLCanvas3D* c = shownCanvas()) c->xr_pointer(action, vec(o), vec(d)); });
+    if (action == 3) {
+        if (gLastHover.action == 3 && len(o - gLastHover.o) < 1.5f && dot(norm(d), norm(gLastHover.d)) > 0.999997f) return;   // (~0.15 deg)
+        gLastHover = {action, o, d};
+    } else gLastHover.action = -1;
+    bool motion = action == 1 || action == 3;
+    if (motion && !gRayEvents.empty() && gRayEvents.back().action == action) gRayEvents.back() = {action, o, d};
+    else gRayEvents.push_back({action, o, d});
+    if (!gRayDrainPosted) { gRayDrainPosted = true; postToGui(drainRayEvents); }
 }
 
 // ---- the ray on the window: a mouse, dispatched by the activity into the window's views (Qt's and the web views)

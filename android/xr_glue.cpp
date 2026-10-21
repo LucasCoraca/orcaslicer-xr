@@ -161,6 +161,9 @@ void loadModels() {
 /** Orca draws its scene for the eye in its canvas' own GL context, and we draw that into the eye's image; then ours is
  *  current again, with the eye's framebuffer, its depth cleared (it is the scene's, which our drawing need not test against) and GL state as we use it. */
 GLuint gSceneTex = 0; std::vector<unsigned char> gScenePx;
+/** Orca's scene in the headset is drawn at this fraction of the eye images' size (they are 1.3 x the recommended size,
+ *  for sharp text): lowered while frames are missed, raised while there is room. */
+float gSceneScale = 0.65f, gSceneMs = 0;
 void drawHostScene(const M4& view, const M4& proj, const EyeView& eye, float nearMm, float farMm) {
     if (!gXr) {
         // the preview: Orca's image of the scene, behind everything else
@@ -178,13 +181,17 @@ void drawHostScene(const M4& view, const M4& proj, const EyeView& eye, float nea
     }
     // the headset: Orca draws the eye into an image of its own (after our last use of it), then we draw that image into
     // the eye's, over what is there so far (the floor)
+    // the eye's image at a fraction of its size (gSceneScale, following how the frames keep up), stretched over it
     static GLsync used[2] = {nullptr, nullptr};
     int e = eye.index & 1;
+    int sw = std::max(64, (int)std::lround(eye.w * gSceneScale)), sh = std::max(64, (int)std::lround(eye.h * gSceneScale));
     EGLSurface draw = eglGetCurrentSurface(EGL_DRAW), read = eglGetCurrentSurface(EGL_READ);
     glFlush();
     void* sync = nullptr; unsigned tex = 0;
-    if (gHost.drawScene) tex = gHost.drawScene(view.m, proj.m, eye.w, eye.h, nearMm, farMm, e, eye.samples, used[e], &sync);
+    auto t0 = std::chrono::steady_clock::now();
+    if (gHost.drawScene) tex = gHost.drawScene(view.m, proj.m, sw, sh, nearMm, farMm, e, eye.samples, used[e], &sync);
     else if (used[e]) glDeleteSync(used[e]);
+    gSceneMs += std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - t0).count();
     used[e] = nullptr;
     eglMakeCurrent(gDpy, draw, read, gCtx);
     if (sync) { glWaitSync((GLsync)sync, 0, GL_TIMEOUT_IGNORED); glDeleteSync((GLsync)sync); }
@@ -336,6 +343,22 @@ void begin(const AppHost& host) {
     } else report(false, err);
 }
 
+/** Once a second: the scene's resolution follows the frame rate (fewer pixels while refreshes are missed, more while
+ *  none are), and a line in the log (frames, missed, the scene's size and Orca's time drawing it). */
+void adaptScene() {
+    using clock = std::chrono::steady_clock;
+    static clock::time_point since = clock::now(); static int calm = 0;
+    float s = std::chrono::duration<float>(clock::now() - since).count();
+    if (s < 1.f) return;
+    int n = gHs.framesDone, late = gHs.framesLate;
+    float lateShare = n ? (float)late / n : 0.f;
+    if (lateShare > 0.05f) { gSceneScale = std::max(0.4f, gSceneScale * 0.88f); calm = 0; }
+    else if (late == 0 && ++calm >= 3) { gSceneScale = std::min(0.85f, gSceneScale * 1.06f); calm = 0; }
+    LOG("frames %.0f/s, %d missed; scene at %.2f of the eye (%dx%d), Orca drawing it %.1f ms a frame", n / s, late, gSceneScale,
+        (int)(gHs.eyeW * gSceneScale), (int)(gHs.eyeH * gSceneScale), n ? gSceneMs / n : 0.f);
+    gHs.framesDone = gHs.framesLate = 0; gSceneMs = 0; since = clock::now();
+}
+
 int frame() {
     if (!gBegun) return 100;
     SavedContext saved;
@@ -349,7 +372,7 @@ int frame() {
         if (gPlaceModel) { gHs.needsPlacement = true; gPlaceModel = false; }
         if (gPlacePanel) gHs.needsPlacement = true;
         if (!gHs.running()) wait = 10;
-        else { gIa.showControllers = true; gHs.frame(gIa, gRenderer); }
+        else { gIa.showControllers = true; gHs.frame(gIa, gRenderer); adaptScene(); }
     } else {
         // the preview: drawn offscreen in our context, copied to the screen by the CPU (the emulator's GL does not cope
         // with a window surface used between other contexts' drawing)

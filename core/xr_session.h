@@ -48,6 +48,8 @@ public:
     bool needsPlacement = true;      // place the model in front of the viewer on the first tracked frame
     // the left eye of the last frame, for a desktop mirror window
     GLuint mirrorTex = 0; int eyeW = 0, eyeH = 0;
+    // frames rendered, and of those shown later than the display's next refresh (a refresh was missed), since reset
+    int framesDone = 0, framesLate = 0;
     Pose head; bool headValid = false;
     /** Test hook: replaces the controllers' input after it is read (desktop --autotest); t = seconds since the first frame. */
     std::function<void(HandInput hands[2], const Pose& head, double t)> inputOverride;

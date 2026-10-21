@@ -42,7 +42,7 @@ the mouse at its centre, so Orca's own picking, selection, gizmos and drags work
 context of the canvas shown (the 3D view or the preview), into an image of Orca's own that the XR side then draws into
 the eye.
 
-## Status (0.1.1)
+## Status (0.1.2)
 
 Tested on the Android emulator, in the headset-free preview (below): Orca's whole interface on the window (tabs,
 settings, the object list, menus, dialogs, the Home page and the setup wizard), typing into settings with the keyboard,
@@ -96,6 +96,10 @@ git submodule update --init
 ORCA_ANDROID=/path/to/built/orcaslicer-android ./build.sh arm64-v8a   # -> dist/OrcaSlicer-XR-quest.apk
 ORCA_ANDROID=/path/to/built/orcaslicer-android ./build.sh x86_64      # -> dist/OrcaSlicer-XR-emulator-x86_64.apk
 ```
+
+In the headset the scene is drawn at a part of the eye images' resolution that follows the frame rate; once a second
+the log (`adb logcat -s orcaxr`) says the frames per second, the refreshes missed, that resolution and Orca's time drawing
+the scene.
 
 Development on the emulator (x86_64): `ORCA_ANDROID=... ./devrun.sh` rebuilds, installs and starts the app and shows its
 log; `./devtools.sh click X Y` clicks the window at a pixel of it, `./devtools.sh panel out.png` saves the window's image
