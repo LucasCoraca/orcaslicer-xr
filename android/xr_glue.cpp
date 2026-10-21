@@ -35,6 +35,9 @@ namespace {
 JavaVM* gVm = nullptr; jobject gActivity = nullptr;
 int gPanelW = 3200, gPanelH = 2000; float gPxPerDp = 2.f;
 AppHost gHost; Interaction gIa; Renderer gRenderer; Headset gHs;
+// where a second's frames went (the log line of frameStats): Orca drawing the scene, the window's image taken in,
+// the XR frame as a whole (waiting for the display included), Qt and Orca between frames; window images taken in
+float gSceneMs = 0, gPanelMs = 0, gFrameMs = 0, gBetweenMs = 0; int gPanelUpdates = 0;
 bool gBegun = false, gXr = false, gPlaceModel = true, gPlacePanel = true, gSrgbControl = false;
 EGLDisplay gDpy = EGL_NO_DISPLAY; EGLContext gCtx = EGL_NO_CONTEXT; EGLConfig gCfg = nullptr;   // ours (shares with Orca's)
 EGLSurface gPbuffer = EGL_NO_SURFACE;
@@ -130,7 +133,9 @@ void clickIfAsked() {
 void updatePanel() {
     clickIfAsked();
     JNIEnv* e = env();
-    if (e->CallBooleanMethod(gActivity, method(e, "updatePanel", "()Z"))) gIa.panelChanged(gRenderer);
+    auto t0 = std::chrono::steady_clock::now();
+    if (e->CallBooleanMethod(gActivity, method(e, "updatePanel", "()Z"))) { gIa.panelChanged(gRenderer); ++gPanelUpdates; }
+    gPanelMs += std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - t0).count();
     dumpPanelIfAsked();
     // the keyboard follows the text focus
     const unsigned char* px = nullptr; int w = 0, h = 0; unsigned ver = 0;
@@ -161,9 +166,9 @@ void loadModels() {
 /** Orca draws its scene for the eye in its canvas' own GL context, and we draw that into the eye's image; then ours is
  *  current again, with the eye's framebuffer, its depth cleared (it is the scene's, which our drawing need not test against) and GL state as we use it. */
 GLuint gSceneTex = 0; std::vector<unsigned char> gScenePx;
-/** Orca's scene in the headset is drawn at this fraction of the eye images' size (they are 1.3 x the recommended size,
- *  for sharp text): lowered while frames are missed, raised while there is room. */
-float gSceneScale = 0.65f, gSceneMs = 0;
+/** Orca's scene in the headset is drawn at this fraction of the eye images' size: they are 1.3 x the recommended size
+ *  (for sharp text on what we draw), the scene is at the recommended size. */
+const float gSceneScale = 1 / 1.3f;
 void drawHostScene(const M4& view, const M4& proj, const EyeView& eye, float nearMm, float farMm) {
     if (!gXr) {
         // the preview: Orca's image of the scene, behind everything else
@@ -181,7 +186,7 @@ void drawHostScene(const M4& view, const M4& proj, const EyeView& eye, float nea
     }
     // the headset: Orca draws the eye into an image of its own (after our last use of it), then we draw that image into
     // the eye's, over what is there so far (the floor)
-    // the eye's image at a fraction of its size (gSceneScale, following how the frames keep up), stretched over it
+    // the eye's image at the recommended size (gSceneScale), stretched over it
     static GLsync used[2] = {nullptr, nullptr};
     int e = eye.index & 1;
     int sw = std::max(64, (int)std::lround(eye.w * gSceneScale)), sh = std::max(64, (int)std::lround(eye.h * gSceneScale));
@@ -343,24 +348,26 @@ void begin(const AppHost& host) {
     } else report(false, err);
 }
 
-/** Once a second: the scene's resolution follows the frame rate (fewer pixels while refreshes are missed, more while
- *  none are), and a line in the log (frames, missed, the scene's size and Orca's time drawing it). */
-void adaptScene() {
+/** Once a second, a line in the log: frames, refreshes missed, and where the time went (ms a frame). */
+void frameStats() {
     using clock = std::chrono::steady_clock;
-    static clock::time_point since = clock::now(); static int calm = 0;
+    static clock::time_point since = clock::now();
     float s = std::chrono::duration<float>(clock::now() - since).count();
     if (s < 1.f) return;
-    int n = gHs.framesDone, late = gHs.framesLate;
-    float lateShare = n ? (float)late / n : 0.f;
-    if (lateShare > 0.05f) { gSceneScale = std::max(0.4f, gSceneScale * 0.88f); calm = 0; }
-    else if (late == 0 && ++calm >= 3) { gSceneScale = std::min(0.85f, gSceneScale * 1.06f); calm = 0; }
-    LOG("frames %.0f/s, %d missed; scene at %.2f of the eye (%dx%d), Orca drawing it %.1f ms a frame", n / s, late, gSceneScale,
-        (int)(gHs.eyeW * gSceneScale), (int)(gHs.eyeH * gSceneScale), n ? gSceneMs / n : 0.f);
-    gHs.framesDone = gHs.framesLate = 0; gSceneMs = 0; since = clock::now();
+    int n = std::max(1, gXr ? gHs.framesDone : (int)std::lround(s * 12));
+    LOG("frames %.0f/s, %d missed; ms a frame: frame %.1f (Orca's scene %.1f, window image %.1f), between frames %.1f; "
+        "window images %.0f/s", (gXr ? gHs.framesDone : n) / s, gHs.framesLate, gFrameMs / n, gSceneMs / n, gPanelMs / n,
+        gBetweenMs / n, gPanelUpdates / s);
+    gHs.framesDone = gHs.framesLate = 0; gSceneMs = gPanelMs = gFrameMs = gBetweenMs = 0; gPanelUpdates = 0; since = clock::now();
 }
 
 int frame() {
     if (!gBegun) return 100;
+    using clock = std::chrono::steady_clock;
+    static clock::time_point lastEnd;
+    clock::time_point start = clock::now();
+    if (lastEnd.time_since_epoch().count()) gBetweenMs += std::chrono::duration<float, std::milli>(start - lastEnd).count();
+    struct Timed { clock::time_point t0; ~Timed() { lastEnd = clock::now(); gFrameMs += std::chrono::duration<float, std::milli>(lastEnd - t0).count(); frameStats(); } } timed{start};
     SavedContext saved;
     int wait = 0;
     if (gXr) {
@@ -372,7 +379,7 @@ int frame() {
         if (gPlaceModel) { gHs.needsPlacement = true; gPlaceModel = false; }
         if (gPlacePanel) gHs.needsPlacement = true;
         if (!gHs.running()) wait = 10;
-        else { gIa.showControllers = true; gHs.frame(gIa, gRenderer); adaptScene(); }
+        else { gIa.showControllers = true; gHs.frame(gIa, gRenderer); }
     } else {
         // the preview: drawn offscreen in our context, copied to the screen by the CPU (the emulator's GL does not cope
         // with a window surface used between other contexts' drawing)
