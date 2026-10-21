@@ -1,0 +1,3 @@
+[submodule "orcaslicer-android"]
+	path = orcaslicer-android
+	url = https://github.com/LucasCoraca/orcaslicer-android.git
