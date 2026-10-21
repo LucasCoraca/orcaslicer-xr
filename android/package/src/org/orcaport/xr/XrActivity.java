@@ -140,6 +140,11 @@ public class XrActivity extends org.qtproject.qt.android.bindings.QtActivity {
                                           DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY);
         presentation = new Presentation(this, display.getDisplay());
         presentation.getWindow().setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(Color.BLACK));
+        // the headset's keyboard types into Qt directly: the system's input method (on a Quest, its own keyboard) is
+        // never attached to Orca's text fields (it would hold what is typed in a composition, committed only on leaving)
+        presentation.getWindow().addFlags(WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM);
+        presentation.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM);
         presentation.setContentView(qtRoot, new ViewGroup.LayoutParams(PX_W, PX_H));
         // Orca's web pages (Home, the setup wizard) go there too
         org.orcaport.wx.WebViewBridge.contentRoot = (FrameLayout) presentation.findViewById(android.R.id.content);

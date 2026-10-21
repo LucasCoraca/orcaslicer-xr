@@ -486,7 +486,7 @@ bool Headset::frame(Interaction& ia, Renderer& r) {
                 M4 vp = mul(proj, viewFrom(ep));
                 r.beginView(target, 0, 0, eye.w, eye.h, true);
                 ia.eye = EyeView{ep, views[e].fov.angleLeft, views[e].fov.angleRight, views[e].fov.angleUp, views[e].fov.angleDown, eye.w, eye.h, 0.02f, 50.f,
-                                 eye.images[idx], eye.depth, target, samples};
+                                 eye.images[idx], eye.depth, target, samples, e};
                 ia.render(r, vp, ep.pos);
 #ifdef __ANDROID__
                 // the depth buffer need not be written back to memory

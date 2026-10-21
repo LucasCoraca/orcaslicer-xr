@@ -111,7 +111,7 @@ void dumpPanelIfAsked() {
 }
 
 /** Development: `adb shell run-as org.orcaport.slicer.xr sh -c 'echo X Y > files/click'` clicks the window at pixel (X, Y)
- *  (`echo X Y r` right-clicks), for scripted tests. */
+ *  (`echo X Y r` right-clicks, `echo U V k` presses the keyboard's key at (U, V) of its image), for scripted tests. */
 void clickIfAsked() {
     static int release = 0; static float rx = 0, ry = 0;
     if (release && --release == 0) { if (gHost.panelMouse) gHost.panelMouse(2, rx, ry, 0); return; }
@@ -121,6 +121,7 @@ void clickIfAsked() {
     float x = 0, y = 0; char r[4] = {0};
     int n = fscanf(f, "%f %f %3s", &x, &y, r); fclose(f); unlink(path.c_str());
     if (n < 2 || !gHost.panelMouse) return;
+    if (r[0] == 'k') { if (gHost.keyboardPress) gHost.keyboardPress(x, y); return; }
     gHost.panelMouse(3, x, y, 0);
     if (r[0] == 'r') { gHost.panelMouse(6, x, y, 0); return; }
     gHost.panelMouse(0, x, y, 0); rx = x; ry = y; release = 2;
@@ -157,8 +158,8 @@ void loadModels() {
     if (am) e->DeleteLocalRef(am);
 }
 
-/** Orca draws its scene into the eye's image, in its canvas' own GL context; then ours is current again, with the eye's
- *  framebuffer, its depth cleared (it is the scene's, which our drawing need not test against) and GL state as we use it. */
+/** Orca draws its scene for the eye in its canvas' own GL context, and we draw that into the eye's image; then ours is
+ *  current again, with the eye's framebuffer, its depth cleared (it is the scene's, which our drawing need not test against) and GL state as we use it. */
 GLuint gSceneTex = 0; std::vector<unsigned char> gScenePx;
 void drawHostScene(const M4& view, const M4& proj, const EyeView& eye, float nearMm, float farMm) {
     if (!gXr) {
@@ -175,18 +176,31 @@ void drawHostScene(const M4& view, const M4& proj, const EyeView& eye, float nea
         glEnable(GL_DEPTH_TEST); glClear(GL_DEPTH_BUFFER_BIT);
         return;
     }
+    // the headset: Orca draws the eye into an image of its own (after our last use of it), then we draw that image into
+    // the eye's, over what is there so far (the floor)
+    static GLsync used[2] = {nullptr, nullptr};
+    int e = eye.index & 1;
     EGLSurface draw = eglGetCurrentSurface(EGL_DRAW), read = eglGetCurrentSurface(EGL_READ);
     glFlush();
-    void* sync = nullptr;
-    if (gHost.drawScene) sync = gHost.drawScene(view.m, proj.m, eye.w, eye.h, nearMm, farMm, eye.color, eye.depth, eye.samples,
-                                                gRenderer.gamma > 1.f && gSrgbControl);
+    void* sync = nullptr; unsigned tex = 0;
+    if (gHost.drawScene) tex = gHost.drawScene(view.m, proj.m, eye.w, eye.h, nearMm, farMm, e, eye.samples, used[e], &sync);
+    else if (used[e]) glDeleteSync(used[e]);
+    used[e] = nullptr;
     eglMakeCurrent(gDpy, draw, read, gCtx);
     if (sync) { glWaitSync((GLsync)sync, 0, GL_TIMEOUT_IGNORED); glDeleteSync((GLsync)sync); }
     glBindFramebuffer(GL_FRAMEBUFFER, eye.fbo); glViewport(0, 0, eye.w, eye.h);
     glBindVertexArray(0); glUseProgram(0); glActiveTexture(GL_TEXTURE0);
-    glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LEQUAL); glDepthMask(GL_TRUE); glDisable(GL_CULL_FACE); glDisable(GL_STENCIL_TEST);
-    glDisable(GL_POLYGON_OFFSET_FILL); glDisable(GL_SCISSOR_TEST); glDisable(GL_BLEND);
+    glDisable(GL_CULL_FACE); glDisable(GL_STENCIL_TEST); glDisable(GL_POLYGON_OFFSET_FILL); glDisable(GL_SCISSOR_TEST);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    if (tex) {
+        glDisable(GL_DEPTH_TEST);
+        std::vector<float> holes; holes.swap(gRenderer.holes);
+        M4 ortho{}; ortho.m[0] = 2; ortho.m[5] = -2; ortho.m[10] = 1; ortho.m[15] = 1;     // (rows from the bottom, as the preview's)
+        gRenderer.drawPanel(tex, false, Pose{V3{}, Q{}, 1}, 1, 1, 0, ortho, 1, nullptr, true);
+        holes.swap(gRenderer.holes);
+        if (!gRenderer.regenerateCopies) { used[e] = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0); glFlush(); }
+    }
+    glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LEQUAL); glDepthMask(GL_TRUE); glDisable(GL_BLEND);
     glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
 }
 

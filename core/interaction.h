@@ -93,7 +93,7 @@ struct HostScene {
  *  when samples > 1), the framebuffer our drawing uses. */
 struct EyeView {
     Pose pose; float left = -0.8f, right = 0.8f, up = 0.6f, down = -0.6f; int w = 1, h = 1; float nearM = 0.02f, farM = 50.f;
-    GLuint color = 0, depth = 0, fbo = 0; int samples = 1;
+    GLuint color = 0, depth = 0, fbo = 0; int samples = 1; int index = 0;   // (0 left, 1 right)
 };
 
 /** An extra surface floating in front of the user, its image drawn by the app (an on-screen keyboard): local pose

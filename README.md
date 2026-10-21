@@ -39,9 +39,10 @@ pull the trigger on its keys (**Done** closes it).
 The room is Orca's 3D view seen from where the controller is: the ray gets a camera of its own looking down it, with
 the mouse at its centre, so Orca's own picking, selection, gizmos and drags work in the room unchanged
 (`GLCanvas3D::xr_pointer` in the Android port). The scene is drawn for each eye by `GLCanvas3D::xr_render_eye`, in the GL
-context of the canvas shown (the 3D view or the preview).
+context of the canvas shown (the 3D view or the preview), into an image of Orca's own that the XR side then draws into
+the eye.
 
-## Status (0.1.0)
+## Status (0.1.1)
 
 Tested on the Android emulator, in the headset-free preview (below): Orca's whole interface on the window (tabs,
 settings, the object list, menus, dialogs, the Home page and the setup wizard), typing into settings with the keyboard,
@@ -85,7 +86,8 @@ trigger pressed (on the window it is the mouse, on the plate the 3D view's mouse
 
 OrcaSlicer's Qt interface runs on a virtual display (`XrActivity.setContentView` puts Qt's root layout on a
 `Presentation`); its image is a `SurfaceTexture` the headset shows as a compositor layer. The XR loop runs on Qt's GUI
-thread in the GL context of Orca's 3D view, so Orca draws its scene straight into the eyes' images.
+thread; Orca draws its scene for each eye in its 3D view's GL context, into a texture shared with the XR side's context
+(fenced both ways), which draws it into the eye's image.
 
 Build OrcaSlicer for Android first (its README: dependencies, Qt for Android, NDK), then:
 

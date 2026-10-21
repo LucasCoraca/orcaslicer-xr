@@ -13,6 +13,7 @@
 #include <QtCore/QTimer>
 #include <QtGui/QGuiApplication>
 #include <QtGui/QImage>
+#include <QtGui/QInputMethod>
 #include <QtGui/QPainter>
 #include <QtGui/QPainterPath>
 #include <QtGui/QScreen>
@@ -60,54 +61,81 @@ GLCanvas3D* homeCanvas() { Plater* p = plater(); return p ? p->get_view3D_canvas
 
 Vec3d vec(V3 v) { return Vec3d(v.x, v.y, v.z); }
 
-// ---- the eyes: per canvas context, a framebuffer on the eye's colour image with a depth-stencil buffer of its own (the
-// XR side's depth stays its own: only textures cross between the contexts)
-typedef void (*FbTex2DMsFn)(GLenum, GLenum, GLenum, GLuint, GLint, GLsizei);
-typedef void (*RbStorageMsFn)(GLenum, GLsizei, GLenum, GLsizei, GLsizei);
-FbTex2DMsFn fbTex2DMs = nullptr; RbStorageMsFn rbStorageMs = nullptr;
+// ---- the eyes: per canvas context and eye, a multisampled framebuffer (colour + depth-stencil) Orca draws into, resolved
+// into a texture the XR side draws into the eye's image. Only that texture crosses between the contexts, finished
+// (fences both ways): the eye's own image (a swapchain image, multisampled-to-texture on the headset) is never drawn into
+// by two contexts.
 struct EyeTarget { GLuint fbo = 0, depth = 0; int w = 0, h = 0, samples = 0; };
-std::map<std::pair<GLCanvas3D*, unsigned>, EyeTarget> gEyes;
+struct EyeImage { GLuint msFbo = 0, msColor = 0, msDepth = 0, fbo = 0, tex = 0, depth = 0; int w = 0, h = 0, samples = 0; };
+std::map<std::pair<GLCanvas3D*, int>, EyeImage> gEyes;
 
-void* drawScene(const float view[16], const float proj[16], int w, int h, float nearMm, float farMm, unsigned color, unsigned /*depth*/,
-                int samples, bool srgbRaw) {
+unsigned drawScene(const float view[16], const float proj[16], int w, int h, float nearMm, float farMm, int eye, int samples,
+                   void* ready, void** sync) {
+    *sync = nullptr;
     GLCanvas3D* c = shownCanvas();
-    if (!makeCanvasCurrent(c)) return nullptr;
-    if (samples > 1 && !fbTex2DMs) {
-        fbTex2DMs = (FbTex2DMsFn)eglGetProcAddress("glFramebufferTexture2DMultisampleEXT");
-        rbStorageMs = (RbStorageMsFn)eglGetProcAddress("glRenderbufferStorageMultisampleEXT");
+    if (!makeCanvasCurrent(c)) return 0;
+    if (ready) { glWaitSync((GLsync)ready, 0, GL_TIMEOUT_IGNORED); glDeleteSync((GLsync)ready); }
+    EyeImage& t = gEyes[{c, eye}];
+    if (samples > 1) { GLint most = 1; glGetIntegerv(GL_MAX_SAMPLES, &most); samples = std::min(samples, (int)most); }
+    if (t.fbo == 0) {
+        glGenFramebuffers(1, &t.fbo); glGenTextures(1, &t.tex); glGenRenderbuffers(1, &t.depth);
+        glGenFramebuffers(1, &t.msFbo); glGenRenderbuffers(1, &t.msColor); glGenRenderbuffers(1, &t.msDepth);
     }
-    bool ms = samples > 1 && fbTex2DMs && rbStorageMs;
-    EyeTarget& t = gEyes[{c, color}];
-    if (t.fbo == 0) { glsafe(::glGenFramebuffers(1, &t.fbo)); glsafe(::glGenRenderbuffers(1, &t.depth)); }
+    const bool ms = samples > 1;
     if (t.w != w || t.h != h || t.samples != samples) {
-        glsafe(::glBindRenderbuffer(GL_RENDERBUFFER, t.depth));
-        if (ms) rbStorageMs(GL_RENDERBUFFER, samples, GL_DEPTH24_STENCIL8, w, h);
-        else glsafe(::glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h));
-        glsafe(::glBindRenderbuffer(GL_RENDERBUFFER, 0));
+        glBindTexture(GL_TEXTURE_2D, t.tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glBindFramebuffer(GL_FRAMEBUFFER, t.fbo);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t.tex, 0);
+        if (ms) glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, 0);
+        else {
+            glBindRenderbuffer(GL_RENDERBUFFER, t.depth);
+            glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h);
+            glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, t.depth);
+        }
+        if (ms) {
+            glBindRenderbuffer(GL_RENDERBUFFER, t.msColor);
+            glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples, GL_RGBA8, w, h);
+            glBindRenderbuffer(GL_RENDERBUFFER, t.msDepth);
+            glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples, GL_DEPTH24_STENCIL8, w, h);
+            glBindFramebuffer(GL_FRAMEBUFFER, t.msFbo);
+            glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, t.msColor);
+            glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, t.msDepth);
+        }
+        glBindRenderbuffer(GL_RENDERBUFFER, 0);
+        GLenum st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        if (st != GL_FRAMEBUFFER_COMPLETE) LOG("eye framebuffer incomplete: 0x%x (%dx%d, %d samples)", st, w, h, samples);
         t.w = w; t.h = h; t.samples = samples;
     }
-    glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, t.fbo));
-    if (ms) fbTex2DMs(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color, 0, samples);
-    else glsafe(::glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color, 0));
-    glsafe(::glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, t.depth));
-    glsafe(::glViewport(0, 0, w, h));
-    glsafe(::glDepthMask(GL_TRUE));
-    glsafe(::glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT));       // (the colour is what the XR side drew so far)
-    if (srgbRaw) glDisable(0x8DB9 /* GL_FRAMEBUFFER_SRGB_EXT */);
+    glBindFramebuffer(GL_FRAMEBUFFER, ms ? t.msFbo : t.fbo);
+    glViewport(0, 0, w, h);
+    glDisable(GL_SCISSOR_TEST);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE); glDepthMask(GL_TRUE);
+    glClearColor(0, 0, 0, 0);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
     Transform3d v; Matrix4d p;
     for (int col = 0; col < 4; ++col) for (int row = 0; row < 4; ++row) { v.matrix()(row, col) = view[col * 4 + row]; p(row, col) = proj[col * 4 + row]; }
     c->xr_render_eye(v, p, w, h, nearMm, farMm);
-    if (srgbRaw) glEnable(0x8DB9);
-    const GLenum discard[] = {GL_DEPTH_ATTACHMENT, GL_STENCIL_ATTACHMENT};
-    glInvalidateFramebuffer(GL_FRAMEBUFFER, 2, discard);
+    glDisable(GL_SCISSOR_TEST);
+    if (ms) {
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, t.msFbo); glBindFramebuffer(GL_DRAW_FRAMEBUFFER, t.fbo);
+        glBlitFramebuffer(0, 0, w, h, 0, 0, w, h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        const GLenum discard[] = {GL_COLOR_ATTACHMENT0, GL_DEPTH_ATTACHMENT, GL_STENCIL_ATTACHMENT};
+        glInvalidateFramebuffer(GL_READ_FRAMEBUFFER, 3, discard);
+    } else {
+        const GLenum discard[] = {GL_DEPTH_ATTACHMENT, GL_STENCIL_ATTACHMENT};
+        glInvalidateFramebuffer(GL_FRAMEBUFFER, 2, discard);
+    }
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     // the XR side waits for this drawing: a fence it waits on, or (the Android emulator, whose GL stalls waiting on
     // another context's fence) finished here
     static const bool emulator = std::strstr((const char*)glGetString(GL_RENDERER), "Emulator") != nullptr;
-    if (emulator) { glFinish(); return nullptr; }
-    GLsync s = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
-    glFlush();
-    return (void*)s;
+    if (emulator) glFinish();
+    else { *sync = (void*)glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0); glFlush(); }
+    return t.tex;
 }
 
 /** The preview's scene: drawn into a framebuffer of the canvas' own and read back. */
@@ -285,6 +313,11 @@ void tryBegin() {
         top->SetSize(r.x(), r.y(), r.width(), r.height());
     };
     fill();
+    // our keyboard, not the system's: Qt never asks for it (see XrActivity: nor is it attached to the window)
+    qApp->setAutoSipEnabled(false);
+    QObject::connect(QGuiApplication::inputMethod(), &QInputMethod::visibleChanged, qApp, [] {
+        if (QGuiApplication::inputMethod()->isVisible()) QGuiApplication::inputMethod()->hide();
+    });
     if (QScreen* sc = QGuiApplication::primaryScreen()) QObject::connect(sc, &QScreen::availableGeometryChanged, qApp, fill);
     AppHost h;
     h.makeCurrent = [] { return makeShareContextCurrent(); };
